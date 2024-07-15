@@ -3,85 +3,82 @@ package main
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
+	"strconv"
 	"sync"
 
-	"github.com/joho/godotenv"
+	"github.com/DedMokus/go-ml-vk-test-task/internal/db"
+	"github.com/DedMokus/go-ml-vk-test-task/internal/document"
+	"github.com/DedMokus/go-ml-vk-test-task/internal/processor"
 )
 
-func init() {
-	//loads values from .env file
-	if err := godotenv.Load(); err != nil {
-		log.Print("No .env file!")
+func main() {
+
+	//Собираем данные из env
+	envnumThreads, exists := os.LookupEnv("NUM_THREADS")
+	if !exists {
+		envnumThreads = "1"
+	}
+	numThreads, err := strconv.Atoi(envnumThreads)
+	if err != nil {
+		log.Fatal("Error converting string:", err)
 	}
 
-}
-
-func main() {
-	numThreads, exists := os.LookupEnv("NUM_THREADS")
+	//Создаем мьютех
 	mu := new(sync.Mutex)
 	wg := new(sync.WaitGroup)
 
-	inChannel := make(chan Document, 10)
-	outChannel := make(chan Document, 100)
+	//Каналы (замена очереди kafka)
+	var inChannel chan *document.Document = make(chan *document.Document, 10)
+	var outChannel chan *document.Document = make(chan *document.Document, 100)
+
+	//Подключение к базе данных
+	data := new(db.PostgreSQLProcessor)
+	data.Connect()
+
+	//Заполнение бд рандомными документами для сравнения (используется один url для простоты)
+	for i := 0; i < 30; i++ {
+		data.QueryRow("qwet")
+	}
 
 	//Заполняем имитацию очереди рандомными документами
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go generateDocument(inChannel, wg, mu)
+		go document.GenerateDocuments(inChannel, wg, mu, "qwet")
 
 	}
 	wg.Wait()
 
 	//Обрабатываем очередь
+	proc := processor.CreateQueueProcessor(data, mu)
 
-}
+	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
+		//Создаем горутин по количеству выставленных потоков
+		go func() {
+			for {
+				if len(inChannel) != 0 {
+					mu.Lock()
+					doc := <-inChannel
+					mu.Unlock()
 
-var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+					doc, err = proc.Process(doc)
+					if doc == nil {
+						return
+					}
+					mu.Lock()
+					outChannel <- doc
+					mu.Unlock()
 
-func RandStringRunes(n int) string {
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+				} else {
+					break
+				}
+			}
+			wg.Done()
+		}()
+
 	}
-	return string(b)
+	wg.Wait()
+	fmt.Printf("Program end!")
+
 }
-
-func generateDocument(in chan Document, wg *sync.WaitGroup, mu *sync.Mutex) {
-	defer wg.Done()
-	var tUrl, TText string
-	var TPubDate, TFetchTime, TFirstFetchTime uint64
-	tUrl = string(rand.Int63n(10))
-	TText = RandStringRunes(10)
-	TPubDate = uint64(rand.Int63n(1000))
-	TFetchTime = uint64(rand.Int63n(1000))
-	TFetchTime = 0
-
-	doc := Document{
-		Url:            tUrl,
-		PubDate:        TPubDate,
-		FetchTime:      TFetchTime,
-		Text:           TText,
-		FirstFetchTime: TFirstFetchTime,
-	}
-	mu.Lock()
-	in <- doc
-	mu.Unlock()
-}
-
-type Document struct {
-	Url            string
-	PubDate        uint64
-	FetchTime      uint64
-	Text           string
-	FirstFetchTime uint64
-}
-
-type Database interface {
-	ProcessCommand()
-}
-
-type DBAccess struct{}
-
-func (db DBAccess) ProcessCommand(command string)
